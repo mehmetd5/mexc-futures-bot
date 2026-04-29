@@ -19,15 +19,20 @@ LOGS = []
 COOLDOWN = {}
 
 SETTINGS = {
-    "max_positions": 3,
-    "max_same_side": 3,
-    "balance_filter": True,
+    "max_positions": 4,
+    "normal_max_same_side": 3,
+    "strong_signal_same_side_limit": 4,
+    "strong_score": 8,
+
     "margin": 5.0,
     "leverage": 10,
+
     "tp_percent": 3.0,
     "sl_percent": 1.5,
+
     "trailing_start_percent": 1.5,
     "trailing_gap_percent": 0.8,
+
     "cooldown_sec": 300,
     "top_scan": 20
 }
@@ -43,7 +48,7 @@ def log(msg):
 def home():
     return {
         "status": "ok",
-        "bot": "V3.1 FULL 13 indicator + TP/SL + trailing + cooldown fix"
+        "bot": "V3.2 flexible balance + top score + 13 indicator"
     }
 
 
@@ -185,6 +190,7 @@ def get_signal_detail(symbol):
             "symbol": symbol,
             "signal": signal,
             "score": score,
+            "abs_score": abs(score),
             "rsi": round(rsi, 2),
             "volume_ok": bool(volume_signal)
         }
@@ -194,23 +200,27 @@ def get_signal_detail(symbol):
             "symbol": symbol,
             "signal": "BEKLE",
             "score": 0,
+            "abs_score": 0,
             "error": str(e)
         }
 
 
-def can_open_side(side):
-    if not SETTINGS["balance_filter"]:
-        return True
-
+def can_open_side(side, score):
     same_side = len([p for p in POSITIONS if p["side"] == side])
-    return same_side < SETTINGS["max_same_side"]
+
+    # Çok güçlü sinyalse 4/4 aynı yöne izin ver
+    if abs(score) >= SETTINGS["strong_score"]:
+        return same_side < SETTINGS["strong_signal_same_side_limit"]
+
+    # Normalde aynı yönde en fazla 3 işlem
+    return same_side < SETTINGS["normal_max_same_side"]
 
 
 def is_in_cooldown(symbol):
     return time.time() < COOLDOWN.get(symbol, 0)
 
 
-def open_trade(symbol, side):
+def open_trade(symbol, side, score=0):
     global BALANCE
 
     if len(POSITIONS) >= SETTINGS["max_positions"]:
@@ -223,8 +233,8 @@ def open_trade(symbol, side):
         log(f"Cooldown: {symbol}")
         return False
 
-    if not can_open_side(side):
-        log(f"Denge filtresi: {side} fazla")
+    if not can_open_side(side, score):
+        log(f"Esnek denge filtresi: {side} fazla | score {score}")
         return False
 
     price = get_price(symbol)
@@ -250,6 +260,7 @@ def open_trade(symbol, side):
         "qty": qty,
         "margin": margin,
         "leverage": leverage,
+        "score": score,
         "pnl": 0.0,
         "change_percent": 0.0,
         "best_percent": 0.0,
@@ -259,7 +270,7 @@ def open_trade(symbol, side):
         "opened_at": time.time()
     })
 
-    log(f"DEMO {side} açıldı: {symbol} | Margin ${margin} | {leverage}x")
+    log(f"DEMO {side} açıldı: {symbol} | score {score} | Margin ${margin} | {leverage}x")
     return True
 
 
@@ -346,17 +357,26 @@ def bot_loop():
     while BOT_RUNNING:
         try:
             update_positions()
-            symbols = get_top_symbols()
 
-            for symbol in symbols:
+            details = []
+            for symbol in get_top_symbols():
+                if any(p["symbol"] == symbol for p in POSITIONS):
+                    continue
+                if is_in_cooldown(symbol):
+                    continue
+
+                d = get_signal_detail(symbol)
+                if d["signal"] in ["LONG", "SHORT"]:
+                    details.append(d)
+
+            # En güçlü skorlu coinleri önce dene
+            details = sorted(details, key=lambda x: x["abs_score"], reverse=True)
+
+            for d in details:
                 if len(POSITIONS) >= SETTINGS["max_positions"]:
                     break
 
-                detail = get_signal_detail(symbol)
-                signal = detail["signal"]
-
-                if signal in ["LONG", "SHORT"]:
-                    open_trade(symbol, signal)
+                open_trade(d["symbol"], d["signal"], d["score"])
 
             time.sleep(15)
 
@@ -441,6 +461,8 @@ def scan():
     for symbol in symbols:
         results.append(get_signal_detail(symbol))
 
+    results = sorted(results, key=lambda x: x.get("abs_score", 0), reverse=True)
+
     return {
         "status": "ok",
         "count": len(results),
@@ -450,7 +472,7 @@ def scan():
 
 @app.get("/force_open")
 def force_open(symbol: str = "BTC_USDT", side: str = "LONG"):
-    ok = open_trade(symbol, side.upper())
+    ok = open_trade(symbol, side.upper(), 99)
 
     return {
         "status": "opened" if ok else "failed",
