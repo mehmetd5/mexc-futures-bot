@@ -20,7 +20,7 @@ COOLDOWN = {}
 
 SETTINGS = {
     "max_positions": 3,
-    "max_same_side": 2,
+    "max_same_side": 3,
     "balance_filter": True,
     "margin": 5.0,
     "leverage": 10,
@@ -43,7 +43,7 @@ def log(msg):
 def home():
     return {
         "status": "ok",
-        "bot": "V3 FULL 13 indicator + TP/SL + trailing + cooldown"
+        "bot": "V3.1 FULL 13 indicator + TP/SL + trailing + cooldown fix"
     }
 
 
@@ -81,7 +81,6 @@ def get_top_symbols():
 
     items = [x for x in data if "USDT" in x.get("symbol", "")]
     items = sorted(items, key=volume_value, reverse=True)
-
     return [x["symbol"] for x in items[:SETTINGS["top_scan"]]]
 
 
@@ -114,30 +113,21 @@ def calc_indicators(closes, highs, lows, vols):
     ema50 = sma(closes, 50)
     avg20 = sma(closes, 20)
 
-    # 1 EMA 9/21
     signals.append(1 if ema9 > ema21 else -1)
-
-    # 2 EMA50 trend
     signals.append(1 if closes[-1] > ema50 else -1)
-
-    # 3 SMA20
     signals.append(1 if closes[-1] > avg20 else -1)
 
-    # 4 Momentum
     momentum = closes[-1] - closes[-10]
     signals.append(1 if momentum > 0 else -1)
 
-    # 5 ROC
     roc = (closes[-1] - closes[-5]) / closes[-5]
     signals.append(1 if roc > 0 else -1)
 
-    # 6 Stochastic
     lowest14 = min(lows[-14:])
     highest14 = max(highs[-14:])
     stoch = (closes[-1] - lowest14) / (highest14 - lowest14 + 1e-9)
     signals.append(1 if stoch < 0.25 else (-1 if stoch > 0.75 else 0))
 
-    # 7 RSI
     gains = []
     losses = []
     for i in range(1, len(closes)):
@@ -151,27 +141,19 @@ def calc_indicators(closes, highs, lows, vols):
     rsi = 100 - (100 / (1 + rs))
     signals.append(1 if rsi < 35 else (-1 if rsi > 65 else 0))
 
-    # 8 MACD proxy
     macd = ema9 - ema21
     signals.append(1 if macd > 0 else -1)
 
-    # 9 Volume spike
     avg_vol = sum(vols[-20:]) / 20 if len(vols) >= 20 else 0
     volume_signal = 1 if len(vols) >= 20 and vols[-1] > avg_vol * 1.15 else 0
     signals.append(volume_signal)
 
-    # 10 Ichimoku
     tenkan = (max(highs[-9:]) + min(lows[-9:])) / 2
     kijun = (max(highs[-26:]) + min(lows[-26:])) / 2
     signals.append(1 if tenkan > kijun else -1)
 
-    # 11 Supertrend proxy
     signals.append(1 if closes[-1] > ema21 else -1)
-
-    # 12 Bollinger mid
     signals.append(1 if closes[-1] > avg20 else -1)
-
-    # 13 Candle direction
     signals.append(1 if closes[-1] > closes[-2] else -1)
 
     return signals, rsi, volume_signal
@@ -284,6 +266,9 @@ def open_trade(symbol, side):
 def close_trade(pos, reason):
     global BALANCE, REALIZED_PNL, WIN, LOSS
 
+    if pos not in POSITIONS:
+        return
+
     price = get_price(pos["symbol"]) or pos["last"]
 
     if pos["side"] == "LONG":
@@ -315,6 +300,9 @@ def close_trade(pos, reason):
 
 def update_positions():
     for p in POSITIONS[:]:
+        if p not in POSITIONS:
+            continue
+
         price = get_price(p["symbol"])
         if not price:
             continue
@@ -337,18 +325,17 @@ def update_positions():
         if change_percent >= SETTINGS["trailing_start_percent"]:
             p["trailing_active"] = True
 
+        close_reason = None
+
         if change_percent >= SETTINGS["tp_percent"]:
-            close_trade(p, "TP")
-            continue
+            close_reason = "TP"
+        elif change_percent <= -SETTINGS["sl_percent"]:
+            close_reason = "SL"
+        elif p["trailing_active"] and change_percent <= p["best_percent"] - SETTINGS["trailing_gap_percent"]:
+            close_reason = "TRAILING"
 
-        if change_percent <= -SETTINGS["sl_percent"]:
-            close_trade(p, "SL")
-            continue
-
-        if p["trailing_active"]:
-            if change_percent <= p["best_percent"] - SETTINGS["trailing_gap_percent"]:
-                close_trade(p, "TRAILING")
-                continue
+        if close_reason:
+            close_trade(p, close_reason)
 
 
 def bot_loop():
