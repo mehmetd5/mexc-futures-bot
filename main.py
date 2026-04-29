@@ -13,6 +13,8 @@ LOGS = []
 
 SETTINGS = {
     "max_positions": 3,
+    "max_same_side": 2,
+    "balance_filter": True,
     "margin": 5.0,
     "leverage": 10,
     "tp_percent": 3.0,
@@ -29,7 +31,7 @@ def log(msg):
 
 @app.get("/")
 def home():
-    return {"status": "ok", "bot": "V2 13 indicator aktif"}
+    return {"status": "ok", "bot": "V2 13 indicator + smart balance filter"}
 
 
 def get_tickers():
@@ -143,9 +145,12 @@ def get_signal_detail(symbol):
         signals, rsi, volume_signal = calc_indicators(closes, vols)
         score = sum(signals)
 
-        if score >= 6 and volume_signal == 1:
+        # AKILLI FILTRE:
+        # Çok güçlü skor varsa volume şartı aramaz.
+        # Orta skor varsa volume onayı ister.
+        if score >= 6 or (score >= 4 and volume_signal == 1):
             signal = "LONG"
-        elif score <= -6 and volume_signal == 1:
+        elif score <= -6 or (score <= -4 and volume_signal == 1):
             signal = "SHORT"
         else:
             signal = "BEKLE"
@@ -167,21 +172,32 @@ def get_signal_detail(symbol):
         }
 
 
-def get_signal(symbol):
-    return get_signal_detail(symbol)["signal"]
+def can_open_side(side):
+    if not SETTINGS.get("balance_filter", True):
+        return True
+
+    same_side_count = len([p for p in POSITIONS if p["side"] == side])
+    return same_side_count < SETTINGS["max_same_side"]
 
 
 def open_trade(symbol, side):
     global BALANCE
 
     if len(POSITIONS) >= SETTINGS["max_positions"]:
+        log("Max açık işlem sınırı dolu")
         return False
 
     if any(p["symbol"] == symbol for p in POSITIONS):
+        log(f"{symbol} zaten açık")
+        return False
+
+    if not can_open_side(side):
+        log(f"Denge filtresi: {side} yönünde fazla işlem var")
         return False
 
     price = get_price(symbol)
     if not price:
+        log(f"{symbol} fiyat alınamadı")
         return False
 
     margin = SETTINGS["margin"]
@@ -297,11 +313,17 @@ def balance():
 def report():
     update_positions()
     open_pnl = sum(p.get("pnl", 0) for p in POSITIONS)
+
+    long_count = len([p for p in POSITIONS if p["side"] == "LONG"])
+    short_count = len([p for p in POSITIONS if p["side"] == "SHORT"])
+
     return {
         "balance": round(BALANCE, 4),
         "open_pnl": round(open_pnl, 4),
         "equity": round(BALANCE + open_pnl, 4),
         "positions": len(POSITIONS),
+        "long_positions": long_count,
+        "short_positions": short_count,
         "logs": LOGS[:30]
     }
 
