@@ -72,7 +72,7 @@ def place_order(symbol, side):
         "Content-Type": "application/json"
     }
 
-    url = f"{BASE_URL}/api/v1/private/order/submit"
+    url = f"{BASE_URL}/api/v1/private/order/create"
 
     r = requests.post(url, headers=headers, data=query)
 
