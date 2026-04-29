@@ -2,6 +2,10 @@ from fastapi import FastAPI
 import requests
 import time
 import threading
+import os
+import hmac
+import hashlib
+import json
 
 app = FastAPI()
 
@@ -18,14 +22,18 @@ CLOSED = []
 LOGS = []
 COOLDOWN = {}
 
+MEXC_KEY = os.getenv("MEXC_KEY", "")
+MEXC_SECRET = os.getenv("MEXC_SECRET", "")
+LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
+
 SETTINGS = {
-    "max_positions": 4,
+    "max_positions": int(os.getenv("MAX_POSITIONS", "4")),
     "normal_max_same_side": 3,
     "strong_signal_same_side_limit": 4,
     "strong_score": 8,
 
-    "margin": 5.0,
-    "leverage": 10,
+    "margin": float(os.getenv("MARGIN", "2")),
+    "leverage": int(os.getenv("LEVERAGE", "3")),
 
     "tp_percent": 3.0,
     "sl_percent": 1.5,
@@ -48,9 +56,111 @@ def log(msg):
 def home():
     return {
         "status": "ok",
-        "bot": "V3.2 flexible balance + top score + 13 indicator"
+        "bot": "V4 API READY + V3.2 paper brain",
+        "live_trading": LIVE_TRADING
     }
 
+
+# =========================
+# MEXC SIGNED API
+# =========================
+
+def mexc_param_string(params):
+    if not params:
+        return ""
+    items = []
+    for key in sorted(params.keys()):
+        value = params[key]
+        if value is None:
+            continue
+        items.append(f"{key}={value}")
+    return "&".join(items)
+
+
+def mexc_signature(timestamp, params=None, body=None):
+    if body is not None:
+        param_string = json.dumps(body, separators=(",", ":"))
+    else:
+        param_string = mexc_param_string(params)
+
+    target = MEXC_KEY + timestamp + param_string
+
+    return hmac.new(
+        MEXC_SECRET.encode("utf-8"),
+        target.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def mexc_headers(params=None, body=None):
+    timestamp = str(int(time.time() * 1000))
+    signature = mexc_signature(timestamp, params=params, body=body)
+
+    return {
+        "ApiKey": MEXC_KEY,
+        "Request-Time": timestamp,
+        "Signature": signature,
+        "Recv-Window": "5000",
+        "Content-Type": "application/json"
+    }
+
+
+def mexc_private_get(path, params=None):
+    headers = mexc_headers(params=params)
+    url = BASE_URL + path
+    r = requests.get(url, headers=headers, params=params or {}, timeout=10)
+    try:
+        return r.json()
+    except:
+        return {"http_status": r.status_code, "text": r.text}
+
+
+def mexc_private_post(path, body=None):
+    body = body or {}
+    headers = mexc_headers(body=body)
+    url = BASE_URL + path
+    r = requests.post(url, headers=headers, json=body, timeout=10)
+    try:
+        return r.json()
+    except:
+        return {"http_status": r.status_code, "text": r.text}
+
+
+@app.get("/api_test")
+def api_test():
+    return {
+        "status": "ok",
+        "api_key_loaded": bool(MEXC_KEY),
+        "secret_loaded": bool(MEXC_SECRET),
+        "live_trading": LIVE_TRADING,
+        "key_length": len(MEXC_KEY),
+        "secret_length": len(MEXC_SECRET)
+    }
+
+
+@app.get("/account")
+def account():
+    if not MEXC_KEY or not MEXC_SECRET:
+        return {
+            "success": False,
+            "error": "MEXC_KEY veya MEXC_SECRET Render Environment içinde yok"
+        }
+
+    return mexc_private_get("/api/v1/private/account/assets")
+
+
+@app.get("/server_time")
+def server_time():
+    try:
+        r = requests.get(f"{BASE_URL}/api/v1/contract/ping", timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# =========================
+# MARKET DATA
+# =========================
 
 def get_tickers():
     try:
@@ -109,6 +219,10 @@ def sma(values, length):
         return None
     return sum(values[-length:]) / length
 
+
+# =========================
+# 13 INDICATOR ENGINE
+# =========================
 
 def calc_indicators(closes, highs, lows, vols):
     signals = []
@@ -173,6 +287,7 @@ def get_signal_detail(symbol):
                 "symbol": symbol,
                 "signal": "BEKLE",
                 "score": 0,
+                "abs_score": 0,
                 "reason": "Yetersiz mum"
             }
 
@@ -205,14 +320,16 @@ def get_signal_detail(symbol):
         }
 
 
+# =========================
+# PAPER TRADE ENGINE
+# =========================
+
 def can_open_side(side, score):
     same_side = len([p for p in POSITIONS if p["side"] == side])
 
-    # Çok güçlü sinyalse 4/4 aynı yöne izin ver
     if abs(score) >= SETTINGS["strong_score"]:
         return same_side < SETTINGS["strong_signal_same_side_limit"]
 
-    # Normalde aynı yönde en fazla 3 işlem
     return same_side < SETTINGS["normal_max_same_side"]
 
 
@@ -270,7 +387,7 @@ def open_trade(symbol, side, score=0):
         "opened_at": time.time()
     })
 
-    log(f"DEMO {side} açıldı: {symbol} | score {score} | Margin ${margin} | {leverage}x")
+    log(f"PAPER {side} açıldı: {symbol} | score {score} | Margin ${margin} | {leverage}x")
     return True
 
 
@@ -369,7 +486,6 @@ def bot_loop():
                 if d["signal"] in ["LONG", "SHORT"]:
                     details.append(d)
 
-            # En güçlü skorlu coinleri önce dene
             details = sorted(details, key=lambda x: x["abs_score"], reverse=True)
 
             for d in details:
@@ -386,6 +502,10 @@ def bot_loop():
 
     log("Bot durdu")
 
+
+# =========================
+# ROUTES
+# =========================
 
 @app.get("/start")
 def start():
