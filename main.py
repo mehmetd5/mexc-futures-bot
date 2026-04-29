@@ -208,3 +208,24 @@ def bot_loop():
 
         except:
             time.sleep(5)
+@app.get("/scan")
+def scan():
+    results = []
+
+    for symbol in SYMBOLS:
+        try:
+            candles = get_candles(symbol)
+            signal = generate_signal(candles)
+
+            results.append({
+                "symbol": symbol,
+                "signal": signal
+            })
+
+        except Exception as e:
+            results.append({
+                "symbol": symbol,
+                "error": str(e)
+            })
+
+    return results
