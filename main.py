@@ -1,148 +1,116 @@
 from fastapi import FastAPI
-import requests, time, threading, os, hmac, hashlib, json
+import requests, time, os, hmac, hashlib, json
 
 app = FastAPI()
 
 BASE_URL = "https://contract.mexc.com"
 
-MEXC_KEY = os.getenv("MEXC_KEY")
-MEXC_SECRET = os.getenv("MEXC_SECRET")
-
+MEXC_KEY = os.getenv("MEXC_KEY", "")
+MEXC_SECRET = os.getenv("MEXC_SECRET", "")
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
-MARGIN = float(os.getenv("MARGIN", 2))
-LEVERAGE = int(os.getenv("LEVERAGE", 3))
-MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", 4))
+MARGIN = float(os.getenv("MARGIN", "1.5"))
+LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 
-BOT_RUNNING = False
-
-POSITIONS = []
 LOGS = []
+ORDER_LOCK = False
 
-# ---------------- SIGN ----------------
-def sign(query):
+
+def add_log(msg):
+    LOGS.insert(0, time.strftime("%H:%M:%S") + " " + msg)
+    if len(LOGS) > 50:
+        LOGS.pop()
+
+
+def sign_post(body_text, timestamp):
+    target = MEXC_KEY + timestamp + body_text
     return hmac.new(
-        MEXC_SECRET.encode(),
-        query.encode(),
+        MEXC_SECRET.encode("utf-8"),
+        target.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
-# ---------------- GET PRICE ----------------
+
+def headers(body_text):
+    timestamp = str(int(time.time() * 1000))
+    return {
+        "ApiKey": MEXC_KEY,
+        "Request-Time": timestamp,
+        "Signature": sign_post(body_text, timestamp),
+        "Content-Type": "application/json",
+        "Recv-Window": "5000",
+        "Language": "English"
+    }
+
+
 def get_price(symbol):
-    url = f"{BASE_URL}/api/v1/contract/ticker"
-    r = requests.get(url).json()
-    for x in r["data"]:
-        if x["symbol"] == symbol:
-            return float(x["lastPrice"])
+    r = requests.get(f"{BASE_URL}/api/v1/contract/ticker", timeout=10)
+    data = r.json().get("data", [])
+    for x in data:
+        if x.get("symbol") == symbol:
+            return float(x.get("lastPrice") or x.get("last") or x.get("fairPrice"))
     return None
 
-# ---------------- ORDER ----------------
-def place_order(symbol, side):
 
+def qty_from_margin(symbol):
     price = get_price(symbol)
     if not price:
-        return False
+        return None
 
-    qty = round((MARGIN * LEVERAGE) / price, 4)
+    raw_qty = (MARGIN * LEVERAGE) / price
 
-    if not LIVE_TRADING:
-        LOGS.append(f"PAPER {side} {symbol}")
-        POSITIONS.append({"symbol": symbol, "side": side})
-        return True
+    if symbol in ["BTC_USDT"]:
+        return round(raw_qty, 4)
+    if symbol in ["ETH_USDT"]:
+        return round(raw_qty, 3)
 
-    timestamp = str(int(time.time() * 1000))
+    return round(raw_qty, 2)
+
+
+def create_market_order(symbol, side):
+    qty = qty_from_margin(symbol)
+    if not qty or qty <= 0:
+        return {"success": False, "error": "qty hesaplanamadı"}
+
+    # MEXC Futures side:
+    # 1 = open long, 3 = open short
+    mexc_side = 1 if side.upper() == "LONG" else 3
 
     body = {
         "symbol": symbol,
-        "price": price,
+        "price": 0,
         "vol": qty,
-        "side": 1 if side == "LONG" else 3,
-        "type": 1,
+        "side": mexc_side,
+        "type": 5,
         "openType": 1,
         "leverage": LEVERAGE
     }
 
-    query = json.dumps(body)
-    signature = sign(query)
-
-    headers = {
-        "ApiKey": MEXC_KEY,
-        "Request-Time": timestamp,
-        "Signature": signature,
-        "Content-Type": "application/json"
-    }
+    body_text = json.dumps(body, separators=(",", ":"))
+    h = headers(body_text)
 
     url = f"{BASE_URL}/api/v1/private/order/create"
+    r = requests.post(url, headers=h, data=body_text, timeout=10)
 
-    r = requests.post(url, headers=headers, data=query)
+    try:
+        result = r.json()
+    except Exception:
+        result = {"http_status": r.status_code, "text": r.text}
 
-    LOGS.append(f"REAL {side} {symbol} -> {r.text}")
+    add_log(f"REAL {side.upper()} {symbol} qty={qty} -> {result}")
+    return result
 
-    return True
-
-# ---------------- SIGNAL ----------------
-def get_signal():
-    coins = ["BTC_USDT","ETH_USDT","SOL_USDT","XRP_USDT"]
-
-    results = []
-
-    for c in coins:
-        rsi = 40  # basit demo
-
-        if rsi > 55:
-            results.append((c, "SHORT"))
-        elif rsi < 45:
-            results.append((c, "LONG"))
-
-    return results
-
-# ---------------- BOT LOOP ----------------
-def bot_loop():
-    global BOT_RUNNING
-
-    while BOT_RUNNING:
-
-        signals = get_signal()
-
-        if len(POSITIONS) < MAX_POSITIONS:
-            for s in signals:
-                if len(POSITIONS) >= MAX_POSITIONS:
-                    break
-
-                place_order(s[0], s[1])
-
-        time.sleep(20)
-
-# ---------------- API ----------------
 
 @app.get("/")
 def home():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "bot": "V4.2 SAFE REAL TEST",
+        "live": LIVE_TRADING,
+        "margin": MARGIN,
+        "leverage": LEVERAGE
+    }
 
-@app.get("/start")
-def start():
-    global BOT_RUNNING
-    if BOT_RUNNING:
-        return {"status": "already_running"}
-
-    BOT_RUNNING = True
-    threading.Thread(target=bot_loop).start()
-
-    return {"status": "started"}
-
-@app.get("/stop")
-def stop():
-    global BOT_RUNNING
-    BOT_RUNNING = False
-    return {"status": "stopped"}
-
-@app.get("/positions")
-def positions():
-    return POSITIONS
-
-@app.get("/logs")
-def logs():
-    return LOGS
 
 @app.get("/api_test")
 def api_test():
@@ -150,4 +118,40 @@ def api_test():
         "api_key_loaded": bool(MEXC_KEY),
         "secret_loaded": bool(MEXC_SECRET),
         "live": LIVE_TRADING
-}
+    }
+
+
+@app.get("/price")
+def price(symbol: str = "BTC_USDT"):
+    return {"symbol": symbol, "price": get_price(symbol)}
+
+
+@app.get("/real_test_once")
+def real_test_once(symbol: str = "BTC_USDT", side: str = "LONG", confirm: str = "false"):
+    global ORDER_LOCK
+
+    if confirm.lower() != "true":
+        return {
+            "status": "blocked",
+            "message": "Gerçek emir için confirm=true yazmalısın"
+        }
+
+    if not LIVE_TRADING:
+        return {"status": "blocked", "message": "LIVE_TRADING false"}
+
+    if ORDER_LOCK:
+        return {"status": "blocked", "message": "Bu deployda test emri zaten denendi"}
+
+    ORDER_LOCK = True
+    result = create_market_order(symbol, side)
+    return result
+
+
+@app.get("/logs")
+def logs():
+    return LOGS
+
+
+@app.get("/stop")
+def stop():
+    return {"status": "stopped", "message": "Bu güvenli sürümde otomatik bot yok; sadece real_test_once var."}
