@@ -20,7 +20,10 @@ BASE_URL = "https://contract.mexc.com"
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "MEXC Futures Bot Backend aktif"}
+    return {
+        "status": "ok",
+        "message": "MEXC Futures Bot Backend aktif"
+    }
 
 
 def get_top_volume_symbols():
@@ -36,7 +39,11 @@ def get_top_volume_symbols():
         reverse=True
     )
 
-    return [x["symbol"] for x in sorted_list if "USDT" in x.get("symbol", "")][:10]
+    return [
+        x["symbol"]
+        for x in sorted_list
+        if "USDT" in x.get("symbol", "")
+    ][:10]
 
 
 def get_signal(symbol):
@@ -64,7 +71,7 @@ def get_signal(symbol):
         else:
             return "BEKLE"
 
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -79,7 +86,10 @@ def bot_loop():
                 if len(OPEN_POSITIONS) >= SETTINGS["max_positions"]:
                     break
 
-                already_open = any(p["symbol"] == symbol for p in OPEN_POSITIONS)
+                already_open = any(
+                    p["symbol"] == symbol for p in OPEN_POSITIONS
+                )
+
                 if already_open:
                     continue
 
@@ -97,7 +107,7 @@ def bot_loop():
 
             time.sleep(10)
 
-        except Exception as e:
+        except Exception:
             time.sleep(5)
 
 
@@ -109,7 +119,11 @@ def start():
         return {"status": "already_running"}
 
     BOT_RUNNING = True
-    thread = threading.Thread(target=bot_loop, daemon=True)
+
+    thread = threading.Thread(
+        target=bot_loop,
+        daemon=True
+    )
     thread.start()
 
     return {"status": "started"}
