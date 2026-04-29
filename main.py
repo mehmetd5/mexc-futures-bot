@@ -8,30 +8,42 @@ BASE_URL = "https://contract.mexc.com"
 BOT_RUNNING = False
 BALANCE = 1000.0
 REALIZED_PNL = 0.0
+WIN = 0
+LOSS = 0
+
 POSITIONS = []
+CLOSED = []
 LOGS = []
+COOLDOWN = {}
 
 SETTINGS = {
     "max_positions": 3,
     "max_same_side": 2,
     "balance_filter": True,
+
     "margin": 5.0,
     "leverage": 10,
+
     "tp_percent": 3.0,
     "sl_percent": 1.5,
+
+    "trailing_start_percent": 1.5,
+    "trailing_gap_percent": 0.8,
+
+    "cooldown_sec": 300,
     "top_scan": 20
 }
 
 
 def log(msg):
     LOGS.insert(0, time.strftime("%H:%M:%S") + " " + msg)
-    if len(LOGS) > 80:
+    if len(LOGS) > 100:
         LOGS.pop()
 
 
 @app.get("/")
 def home():
-    return {"status": "ok", "bot": "V2 13 indicator + smart balance filter"}
+    return {"status": "ok", "bot": "V3 13 indicator + TP/SL + trailing + cooldown"}
 
 
 def get_tickers():
@@ -106,253 +118,4 @@ def calc_indicators(closes, vols):
     avg_loss = sum(losses[-14:]) / 14 if sum(losses[-14:]) != 0 else 1
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    signals.append(1 if rsi < 35 else (-1 if rsi > 65 else 0))
-
-    macd = ema9 - ema21
-    signals.append(1 if macd > 0 else -1)
-
-    avg_vol = sum(vols[-20:]) / 20 if len(vols) >= 20 else 0
-    volume_signal = 1 if len(vols) >= 20 and vols[-1] > avg_vol * 1.15 else 0
-    signals.append(volume_signal)
-
-    tenkan = (max(closes[-9:]) + min(closes[-9:])) / 2
-    kijun = (max(closes[-26:]) + min(closes[-26:])) / 2
-    signals.append(1 if tenkan > kijun else -1)
-
-    signals.append(1 if closes[-1] > ema21 else -1)
-
-    bb_mid = avg20
-    signals.append(1 if closes[-1] > bb_mid else -1)
-
-    candle = 1 if closes[-1] > closes[-2] else -1
-    signals.append(candle)
-
-    return signals, rsi, volume_signal
-
-
-def get_signal_detail(symbol):
-    try:
-        closes, vols = get_klines(symbol)
-
-        if len(closes) < 50:
-            return {
-                "symbol": symbol,
-                "signal": "BEKLE",
-                "score": 0,
-                "reason": "Yetersiz mum"
-            }
-
-        signals, rsi, volume_signal = calc_indicators(closes, vols)
-        score = sum(signals)
-
-        # AKILLI FILTRE:
-        # Çok güçlü skor varsa volume şartı aramaz.
-        # Orta skor varsa volume onayı ister.
-        if score >= 6 or (score >= 4 and volume_signal == 1):
-            signal = "LONG"
-        elif score <= -6 or (score <= -4 and volume_signal == 1):
-            signal = "SHORT"
-        else:
-            signal = "BEKLE"
-
-        return {
-            "symbol": symbol,
-            "signal": signal,
-            "score": score,
-            "rsi": round(rsi, 2),
-            "volume_ok": bool(volume_signal)
-        }
-
-    except Exception as e:
-        return {
-            "symbol": symbol,
-            "signal": "BEKLE",
-            "score": 0,
-            "error": str(e)
-        }
-
-
-def can_open_side(side):
-    if not SETTINGS.get("balance_filter", True):
-        return True
-
-    same_side_count = len([p for p in POSITIONS if p["side"] == side])
-    return same_side_count < SETTINGS["max_same_side"]
-
-
-def open_trade(symbol, side):
-    global BALANCE
-
-    if len(POSITIONS) >= SETTINGS["max_positions"]:
-        log("Max açık işlem sınırı dolu")
-        return False
-
-    if any(p["symbol"] == symbol for p in POSITIONS):
-        log(f"{symbol} zaten açık")
-        return False
-
-    if not can_open_side(side):
-        log(f"Denge filtresi: {side} yönünde fazla işlem var")
-        return False
-
-    price = get_price(symbol)
-    if not price:
-        log(f"{symbol} fiyat alınamadı")
-        return False
-
-    margin = SETTINGS["margin"]
-    leverage = SETTINGS["leverage"]
-
-    if BALANCE < margin:
-        log("Bakiye yetersiz")
-        return False
-
-    qty = (margin * leverage) / price
-    BALANCE -= margin
-
-    POSITIONS.append({
-        "symbol": symbol,
-        "side": side,
-        "entry": price,
-        "last": price,
-        "qty": qty,
-        "margin": margin,
-        "leverage": leverage,
-        "pnl": 0.0,
-        "tp_percent": SETTINGS["tp_percent"],
-        "sl_percent": SETTINGS["sl_percent"],
-        "opened_at": time.time()
-    })
-
-    log(f"DEMO {side} açıldı: {symbol} | Margin ${margin} | {leverage}x")
-    return True
-
-
-def update_positions():
-    for p in POSITIONS:
-        price = get_price(p["symbol"])
-        if not price:
-            continue
-
-        p["last"] = price
-
-        if p["side"] == "LONG":
-            p["pnl"] = (price - p["entry"]) * p["qty"]
-        else:
-            p["pnl"] = (p["entry"] - price) * p["qty"]
-
-
-def bot_loop():
-    global BOT_RUNNING
-
-    log("Bot başladı")
-
-    while BOT_RUNNING:
-        try:
-            update_positions()
-
-            symbols = get_top_symbols()
-
-            for s in symbols:
-                if len(POSITIONS) >= SETTINGS["max_positions"]:
-                    break
-
-                detail = get_signal_detail(s)
-                signal = detail["signal"]
-
-                if signal in ["LONG", "SHORT"]:
-                    open_trade(s, signal)
-
-            time.sleep(15)
-
-        except Exception as e:
-            log(f"Bot hata: {e}")
-            time.sleep(5)
-
-    log("Bot durdu")
-
-
-@app.get("/start")
-def start():
-    global BOT_RUNNING
-
-    if BOT_RUNNING:
-        return {"status": "already_running"}
-
-    BOT_RUNNING = True
-    threading.Thread(target=bot_loop, daemon=True).start()
-    return {"status": "started"}
-
-
-@app.get("/stop")
-def stop():
-    global BOT_RUNNING
-    BOT_RUNNING = False
-    return {"status": "stopped"}
-
-
-@app.get("/positions")
-def positions():
-    update_positions()
-    return {"count": len(POSITIONS), "positions": POSITIONS}
-
-
-@app.get("/balance")
-def balance():
-    update_positions()
-    open_pnl = sum(p.get("pnl", 0) for p in POSITIONS)
-    return {
-        "balance": round(BALANCE, 4),
-        "open_pnl": round(open_pnl, 4),
-        "equity": round(BALANCE + open_pnl, 4),
-        "open_positions": len(POSITIONS)
-    }
-
-
-@app.get("/report")
-def report():
-    update_positions()
-    open_pnl = sum(p.get("pnl", 0) for p in POSITIONS)
-
-    long_count = len([p for p in POSITIONS if p["side"] == "LONG"])
-    short_count = len([p for p in POSITIONS if p["side"] == "SHORT"])
-
-    return {
-        "balance": round(BALANCE, 4),
-        "open_pnl": round(open_pnl, 4),
-        "equity": round(BALANCE + open_pnl, 4),
-        "positions": len(POSITIONS),
-        "long_positions": long_count,
-        "short_positions": short_count,
-        "logs": LOGS[:30]
-    }
-
-
-@app.get("/scan")
-def scan():
-    results = []
-    symbols = get_top_symbols()
-
-    for symbol in symbols:
-        results.append(get_signal_detail(symbol))
-
-    return {
-        "status": "ok",
-        "count": len(results),
-        "results": results
-    }
-
-
-@app.get("/force_open")
-def force_open(symbol: str = "BTC_USDT", side: str = "LONG"):
-    ok = open_trade(symbol, side.upper())
-    return {
-        "status": "opened" if ok else "failed",
-        "symbol": symbol,
-        "side": side.upper()
-    }
-
-
-@app.get("/settings")
-def settings():
-    return SETTINGS
+    signals.append(1 if rsi < 35 else
