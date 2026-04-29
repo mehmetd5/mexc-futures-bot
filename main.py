@@ -87,7 +87,7 @@ def get_signal():
     results = []
 
     for c in coins:
-        rsi = 50  # basit demo
+        rsi = 40  # basit demo
 
         if rsi > 55:
             results.append((c, "SHORT"))
