@@ -9,6 +9,7 @@ MEXC_KEY = os.getenv("MEXC_KEY", "")
 MEXC_SECRET = os.getenv("MEXC_SECRET", "")
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
+SYMBOL = "XRP_USDT"
 MARGIN = float(os.getenv("MARGIN", "1.5"))
 LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 
@@ -22,75 +23,97 @@ def log(x):
         LOGS.pop()
 
 
-# 🔑 SIGN
-def sign(param, timestamp):
-    text = MEXC_KEY + timestamp + param
+def sign(param_string, timestamp):
+    target = MEXC_KEY + timestamp + param_string
     return hmac.new(
-        MEXC_SECRET.encode(),
-        text.encode(),
+        MEXC_SECRET.encode("utf-8"),
+        target.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
 
-def headers(param):
+def make_headers(param_string):
     timestamp = str(int(time.time() * 1000))
     return {
         "ApiKey": MEXC_KEY,
         "Request-Time": timestamp,
-        "Signature": sign(param, timestamp),
-        "Content-Type": "application/json"
+        "Signature": sign(param_string, timestamp),
+        "Content-Type": "application/json",
+        "Recv-Window": "30000"
     }
 
 
-# 🌍 PUBLIC
-def get_price(symbol):
-    r = requests.get(BASE_URL + "/api/v1/contract/ticker").json()
-    for x in r["data"]:
-        if x["symbol"] == symbol:
-            return float(x["lastPrice"])
+def public_get(path):
+    r = requests.get(BASE_URL + path, timeout=10)
+    try:
+        return r.json()
+    except Exception:
+        return {"http_status": r.status_code, "text": r.text}
+
+
+def private_get(path):
+    param_string = ""
+    r = requests.get(
+        BASE_URL + path,
+        headers=make_headers(param_string),
+        timeout=10
+    )
+    try:
+        return r.json()
+    except Exception:
+        return {"http_status": r.status_code, "text": r.text}
+
+
+def private_post(path, body):
+    body_text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    r = requests.post(
+        BASE_URL + path,
+        headers=make_headers(body_text),
+        data=body_text,
+        timeout=10
+    )
+    try:
+        return r.json()
+    except Exception:
+        return {"http_status": r.status_code, "text": r.text}
+
+
+def get_price():
+    data = public_get("/api/v1/contract/ticker")
+    for x in data.get("data", []):
+        if x.get("symbol") == SYMBOL:
+            return float(x.get("lastPrice") or x.get("last") or x.get("fairPrice"))
     return None
 
 
-# 🔒 PRIVATE GET
-def private_get(path):
-    param = ""
-    r = requests.get(BASE_URL + path, headers=headers(param))
-    try:
-        return r.json()
-    except:
-        return {"error": r.text}
-
-
-# 🔒 PRIVATE POST
-def private_post(path, body):
-    param = json.dumps(body, separators=(",", ":"))
-    r = requests.post(BASE_URL + path, headers=headers(param), data=param)
-    try:
-        return r.json()
-    except:
-        return {"error": r.text}
-
-
-def calc_qty(symbol):
-    price = get_price(symbol)
+def calc_qty():
+    price = get_price()
     if not price:
         return None
+
     qty = (MARGIN * LEVERAGE) / price
-    return round(qty, 3)
 
+    # XRP minimum 1 adet dediğin için
+    return max(round(qty, 0), 1)
 
-# ---------------- API ----------------
 
 @app.get("/")
 def home():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "bot": "V5 XRP SAFE TEST",
+        "symbol": SYMBOL,
+        "live": LIVE_TRADING,
+        "margin": MARGIN,
+        "leverage": LEVERAGE
+    }
 
 
 @app.get("/api_test")
 def api_test():
     return {
-        "key": bool(MEXC_KEY),
-        "secret": bool(MEXC_SECRET),
+        "api_key_loaded": bool(MEXC_KEY),
+        "secret_loaded": bool(MEXC_SECRET),
         "live": LIVE_TRADING
     }
 
@@ -101,47 +124,50 @@ def account():
 
 
 @app.get("/price")
-def price(symbol: str = "BTC_USDT"):
+def price():
     return {
-        "price": get_price(symbol),
-        "qty": calc_qty(symbol)
+        "symbol": SYMBOL,
+        "price": get_price(),
+        "qty": calc_qty()
     }
 
 
 @app.get("/real_test_once")
-def real_test_once(symbol: str = "BTC_USDT", side: str = "LONG", confirm: str = "false"):
+def real_test_once(confirm: str = "false"):
     global LOCK
 
-    if confirm != "true":
-        return {"error": "confirm=true gerekli"}
+    if confirm.lower() != "true":
+        return {"status": "blocked", "message": "confirm=true gerekli"}
 
     if not LIVE_TRADING:
-        return {"error": "LIVE kapalı"}
+        return {"status": "blocked", "message": "LIVE_TRADING false"}
 
     if LOCK:
-        return {"error": "zaten çalıştı"}
+        return {"status": "blocked", "message": "Bu deployda test zaten denendi"}
 
-    qty = calc_qty(symbol)
+    qty = calc_qty()
     if not qty:
-        return {"error": "qty yok"}
-
-    mexc_side = 1 if side == "LONG" else 3
+        return {"success": False, "error": "qty hesaplanamadı"}
 
     body = {
-        "symbol": symbol,
+        "symbol": SYMBOL,
         "price": 0,
         "vol": qty,
-        "side": mexc_side,
-        "type": 5,
+        "side": 1,       # 1 = open long
+        "type": 5,       # market order
         "openType": 1,
         "leverage": LEVERAGE
     }
 
     LOCK = True
-
     result = private_post("/api/v1/private/order/create", body)
 
-    log(result)
+    log({
+        "symbol": SYMBOL,
+        "side": "LONG",
+        "qty": qty,
+        "result": result
+    })
 
     return result
 
@@ -149,3 +175,8 @@ def real_test_once(symbol: str = "BTC_USDT", side: str = "LONG", confirm: str = 
 @app.get("/logs")
 def logs():
     return LOGS
+
+
+@app.get("/stop")
+def stop():
+    return {"status": "stopped", "message": "Otomatik bot yok"}
